@@ -170,6 +170,7 @@ class GoProxyHelpers(object):
 class GoProxyMacOS(NSObject):
 
     console_color = ColorSet[0]
+    max_line_count = 1000
 
     def applicationDidFinishLaunching_(self, notification):
         self.helper = GoProxyHelpers()
@@ -245,12 +246,13 @@ class GoProxyMacOS(NSObject):
         self.console_view.setVerticallyResizable_(True)
         self.console_view.setHorizontallyResizable_(True)
         self.console_view.setAutoresizingMask_(NSViewWidthSizable)
+        self.console_line_count = 0
 
         self.scroll_view.setDocumentView_(self.console_view)
         self.console_window.contentView().addSubview_(self.scroll_view)
 
         # Update Proxy Menu
-        self.updateproxystate_(None)
+        AppHelper.callLater(1, self.updateproxystate_, None)
         # Hide dock icon
         NSApp.setActivationPolicy_(NSApplicationActivationPolicyProhibited)
 
@@ -317,7 +319,11 @@ class GoProxyMacOS(NSObject):
     def readProxyOutput(self):
         while(True):
             line = self.pipe_fd.readline()
+            if self.console_line_count > self.max_line_count:
+                self.console_view.setString_('')
+                self.console_line_count = 0
             self.performSelectorOnMainThread_withObject_waitUntilDone_('refreshDisplay:', line, None)
+            self.console_line_count += 1
 
     def updateproxystate_(self, notification):
         # Add checkmark to submenu
@@ -365,6 +371,26 @@ class GoProxyMacOS(NSObject):
         NSApp.terminate_(self)
 
 
+def get_executables():
+    MAXPATHLEN = 1024
+    PROC_PIDPATHINFO_MAXSIZE = MAXPATHLEN * 4
+    PROC_ALL_PIDS = 1
+    libc = ctypes.CDLL(ctypes.util.find_library('c'))
+    number_of_pids = libc.proc_listpids(PROC_ALL_PIDS, 0, None, 0)
+    pid_list = (ctypes.c_uint32 * (number_of_pids * 2))()
+    libc.proc_listpids(PROC_ALL_PIDS, 0, pid_list, ctypes.sizeof(pid_list))
+    results = []
+    path_size = PROC_PIDPATHINFO_MAXSIZE
+    path_buffer = ctypes.create_string_buffer('\0'*path_size,path_size)
+    for pid in pid_list:
+        # re-use the buffer
+        ctypes.memset(path_buffer, 0, path_size)
+        return_code = libc.proc_pidpath(pid, path_buffer, path_size)
+        if path_buffer.value:
+            results.append((pid, path_buffer.value))
+    return results
+
+
 def precheck():
     has_user_json = glob.glob('*.user.json') != []
     if not has_user_json:
@@ -376,6 +402,9 @@ def precheck():
         NSApp.activateIgnoringOtherApps_(True)
         pressed = alert.runModal()
         os.system('open "%s"' % os.path.dirname(__file__))
+    for pid, path in get_executables():
+        if path.endswith('/goproxy'):
+            os.kill(pid, 9)
 
 
 def main():

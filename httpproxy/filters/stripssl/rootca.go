@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"io/ioutil"
 	"math/big"
 	"net"
@@ -68,7 +69,7 @@ func NewRootCA(name string, vaildFor time.Duration, certDir string, portable boo
 		mu:       new(sync.Mutex),
 	}
 
-	if storage.NotExist(store, certFile) {
+	if storage.IsNotExist(store.Head(certFile)) {
 		glog.Infof("Generating RootCA for %s/%s", keyFile, certFile)
 		template := x509.Certificate{
 			IsCA:         true,
@@ -161,6 +162,8 @@ func NewRootCA(name string, vaildFor time.Duration, certDir string, portable boo
 						return nil, err
 					}
 					rootCA.priv = priv
+				case "EC PRIVATE KEY":
+					return nil, fmt.Errorf("unsupported %#v certificate, name=%#v", b.Type, name)
 				}
 			}
 		}
@@ -190,7 +193,7 @@ func NewRootCA(name string, vaildFor time.Duration, certDir string, portable boo
 	}
 
 	if fs, ok := store.(*storage.FileStore); ok {
-		if storage.NotExist(store, certDir) {
+		if storage.IsNotExist(store.Head(certDir)) {
 			if err := os.MkdirAll(filepath.Join(fs.Dirname, certDir), 0777); err != nil {
 				return nil, err
 			}
@@ -371,11 +374,20 @@ func (c *RootCA) toFilename(commonName string, ecc bool) string {
 func (c *RootCA) Issue(commonName string, vaildFor time.Duration, ecc bool) (*tls.Certificate, error) {
 	certFile := c.toFilename(commonName, ecc)
 
-	if storage.NotExist(c.store, certFile) {
+	resp, err := c.store.Get(certFile)
+	switch {
+	case err == nil && resp.StatusCode == http.StatusOK:
+		t, err := time.Parse(storage.DateFormat, resp.Header.Get("Last-Modified"))
+		if err == nil && time.Now().Sub(t) < 3*30*24*time.Hour {
+			break
+		}
+		resp.Body.Close()
+		c.store.Delete(certFile)
+		fallthrough
+	case storage.IsNotExist(resp, err):
 		glog.V(2).Infof("Issue %s certificate for %#v...", c.name, commonName)
 		c.mu.Lock()
-		defer c.mu.Unlock()
-		if storage.NotExist(c.store, certFile) {
+		if storage.IsNotExist(c.store.Head(certFile)) {
 			var err error
 
 			if ecc {
@@ -383,19 +395,21 @@ func (c *RootCA) Issue(commonName string, vaildFor time.Duration, ecc bool) (*tl
 			} else {
 				err = c.issueRSA(commonName, vaildFor)
 			}
-
 			if err != nil {
+				c.mu.Unlock()
 				return nil, err
 			}
 		}
-	}
-
-	resp, err := c.store.Get(certFile)
-	if err != nil {
+		c.mu.Unlock()
+		resp, err = c.store.Get(certFile)
+		if err != nil {
+			return nil, err
+		}
+	case err != nil:
 		return nil, err
 	}
-	defer resp.Body.Close()
 
+	defer resp.Body.Close()
 	data, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err

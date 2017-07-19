@@ -7,6 +7,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -17,10 +18,10 @@ import (
 	"time"
 
 	"github.com/cloudflare/golibs/lrucache"
-	tls "github.com/google/boringssl/ssl/test/runner"
+	"github.com/phuslu/quic-conn"
 )
 
-func HTTPS(network, addr string, auth *Auth, forward Dialer, resolver Resolver) (Dialer, error) {
+func QUIC(network, addr string, auth *Auth, forward Dialer, resolver Resolver) (Dialer, error) {
 	var hostname string
 
 	if host, _, err := net.SplitHostPort(addr); err == nil {
@@ -30,7 +31,7 @@ func HTTPS(network, addr string, auth *Auth, forward Dialer, resolver Resolver) 
 		addr = net.JoinHostPort(addr, "443")
 	}
 
-	s := &https{
+	s := &quic{
 		network:  network,
 		addr:     addr,
 		hostname: hostname,
@@ -46,7 +47,7 @@ func HTTPS(network, addr string, auth *Auth, forward Dialer, resolver Resolver) 
 	return s, nil
 }
 
-type https struct {
+type quic struct {
 	user, password string
 	network, addr  string
 	hostname       string
@@ -56,23 +57,12 @@ type https struct {
 }
 
 // Dial connects to the address addr on the network net via the HTTPS proxy.
-func (h *https) Dial(network, addr string) (net.Conn, error) {
+func (h *quic) Dial(network, addr string) (net.Conn, error) {
 	switch network {
 	case "tcp", "tcp6", "tcp4":
 	default:
-		return nil, errors.New("proxy: no support for HTTP proxy connections of type " + network)
+		return nil, errors.New("proxy: no support for QUIC proxy connections of type " + network)
 	}
-
-	conn0, err := h.forward.Dial(h.network, h.addr)
-	if err != nil {
-		return nil, err
-	}
-	closeConn0 := &conn0
-	defer func() {
-		if closeConn0 != nil {
-			(*closeConn0).Close()
-		}
-	}()
 
 	var config *tls.Config
 	if v, ok := h.cache.GetNotStale(h.addr); ok {
@@ -84,20 +74,20 @@ func (h *https) Dial(network, addr string) (net.Conn, error) {
 			InsecureSkipVerify: true,
 			ServerName:         h.hostname,
 			ClientSessionCache: tls.NewLRUClientSessionCache(1024),
-			MaxEarlyDataSize:   100 * 1024,
-			// Max0RTTDataSize:    100 * 1024,
 		}
 		h.cache.Set(h.addr, config, time.Now().Add(2*time.Hour))
 	}
 
-	conn1 := tls.Client(conn0, config)
-
-	err = conn1.Handshake()
+	conn, err := quicconn.Dial(h.addr, config)
 	if err != nil {
 		return nil, err
 	}
-
-	var conn net.Conn = conn1
+	closeConn := &conn
+	defer func() {
+		if closeConn != nil {
+			(*closeConn).Close()
+		}
+	}()
 
 	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -163,6 +153,6 @@ func (h *https) Dial(network, addr string) (net.Conn, error) {
 		return nil, errors.New("proxy: failed to read greeting from HTTP proxy at " + h.addr + ": " + resp.Status)
 	}
 
-	closeConn0 = nil
+	closeConn = nil
 	return conn, nil
 }

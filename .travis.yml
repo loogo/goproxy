@@ -3,10 +3,6 @@ sudo: false
 
 language: bash
 
-env:
-  global:
-    - GOBRANCH=master
-
 script:
   - cd /tmp
   - bash -xe < <(curl -kL https://github.com/phuslu/goproxy/raw/master/assets/build/ci.sh)
@@ -24,11 +20,3 @@ addons:
       - lftp
       - libc6-dev-armhf-cross
       - p7zip-full
-
-notifications:
-  webhooks:
-    urls:
-      - https://webhooks.gitter.im/e/cf18a3489def38eefa87
-    on_success: always
-    on_failure: always
-    on_start: always

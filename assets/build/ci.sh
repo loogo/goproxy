@@ -7,13 +7,12 @@ export GITHUB_CI_REPO=${GITHUB_CI_REPO:-goproxy-ci}
 export GITHUB_COMMIT_ID=${TRAVIS_COMMIT:-${COMMIT_ID:-master}}
 export SOURCEFORGE_USER=${SOURCEFORGE_USER:-${GITHUB_USER}}
 export SOURCEFORGE_REPO=${SOURCEFORGE_REPO:-${GITHUB_REPO}}
-export WORKING_DIR=$(pwd)/${GITHUB_REPO}.$(date "+%y%m%d").${RANDOM:-$$}
+export WORKING_DIR=$(pwd)/${GITHUB_REPO}.${RANDOM:-$$}
 export GOROOT_BOOTSTRAP=${WORKING_DIR}/goroot_bootstrap
 export GOROOT=${WORKING_DIR}/go
 export GOPATH=${WORKING_DIR}/gopath
 export PATH=$GOROOT/bin:$GOPATH/bin:$PATH
-export GOBRANCH=${GOBRANCH:-master}
-export GOBRANCH_FOLLOW=${GOBRANCH_FOLLOW:-true}
+export GOTIP_FOLLOW=${GOTIP_FOLLOW:-true}
 
 if [ ${#GITHUB_TOKEN} -eq 0 ]; then
 	echo "WARNING: \$GITHUB_TOKEN is not set!"
@@ -23,7 +22,7 @@ if [ ${#SOURCEFORGE_PASSWORD} -eq 0 ]; then
 	echo "WARNING: \$SOURCEFORGE_PASSWORD is not set!"
 fi
 
-for CMD in curl awk git tar bzip2 xz 7za gcc make sha1sum timeout
+for CMD in curl awk git tar bzip2 xz 7za gcc sha1sum timeout
 do
 	if ! type -p ${CMD}; then
 		echo -e "\e[1;31mtool ${CMD} is not installed, abort.\e[0m"
@@ -64,14 +63,14 @@ function build_go() {
 	curl -k https://storage.googleapis.com/golang/go1.4.3.linux-amd64.tar.gz | tar xz
 	mv go goroot_bootstrap
 
-	git clone --branch ${GOBRANCH} https://github.com/phuslu/go
+	git clone --branch master https://github.com/phuslu/go
 	cd go/src
-	if [ "${GOBRANCH_FOLLOW}" = "true" ]; then
+	if [ "${GOTIP_FOLLOW}" = "true" ]; then
 		git remote add -f upstream https://github.com/golang/go
-		git rebase upstream/${GOBRANCH}
+		git rebase upstream/master
 	fi
 	bash ./make.bash
-	grep -q 'machine github.com' ~/.netrc && git push -f origin ${GOBRANCH}
+	grep -q 'machine github.com' ~/.netrc && git push -f origin master
 
 	set +ex
 	echo '================================================================================'
@@ -115,6 +114,33 @@ function build_http2() {
 	popd
 }
 
+function build_bogo() {
+	pushd ${WORKING_DIR}
+
+	git clone https://github.com/google/boringssl $GOPATH/src/github.com/google/boringssl
+	cd $GOPATH/src/github.com/google/boringssl/ssl/test/runner
+	sed -i -E 's#"./(curve25519|poly1305)"#"golang.org/x/crypto/\1"#g' *.go
+	sed -i -E 's#"./(ed25519)"#"github.com/google/boringssl/ssl/test/runner/\1"#g' *.go
+	sed -i -E 's#"./(internal/edwards25519)"#"github.com/google/boringssl/ssl/test/runner/ed25519/\1"#g' ed25519/*.go
+	git commit -m "change imports" -s -a
+	go get -x github.com/google/boringssl/ssl/test/runner
+
+	popd
+}
+
+function build_quicgo() {
+	pushd ${WORKING_DIR}
+
+	git clone https://github.com/phuslu/quic-go $GOPATH/src/github.com/phuslu/quic-go
+	cd $GOPATH/src/github.com/phuslu/quic-go
+	git remote add -f upstream https://github.com/lucas-clemente/quic-go
+	git rebase upstream/master
+	go get -v github.com/phuslu/quic-go/h2quic
+	grep -q 'machine github.com' ~/.netrc && git push -f origin master
+
+	popd
+}
+
 function build_repo() {
 	pushd ${WORKING_DIR}
 
@@ -149,7 +175,7 @@ function build_repo() {
 	go test -v ./httpproxy/helpers
 
 	if curl -m 3 https://pki.google.com >/dev/null ; then
-		GoogleG2PKP=$(curl -s https://pki.google.com/GIAG2.crt | openssl x509 -inform der -pubkey | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | openssl base64)
+		GoogleG2PKP=$(curl -s https://pki.google.com/GIAG2.crt | openssl x509 -pubkey | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | openssl base64)
 		sed -i -r "s/\"GoogleG2PKP\": \".+\"/\"GoogleG2PKP\": \"$GoogleG2PKP\"/g" httpproxy/filters/gae/gae.json
 		if git status -s | grep -q 'gae.json' ; then
 			git diff
@@ -159,30 +185,31 @@ function build_repo() {
 		fi
 	fi
 
-	make GOARCH=amd64 -C ./assets/taskbar
-	cp -f ./assets/taskbar/goproxy-gui.exe ./assets/packaging/goproxy-gui.exe
-	make GOOS=windows GOARCH=amd64 CGO_ENABLED=0
-
-	make GOARCH=386 -C ./assets/taskbar
-	cp -f ./assets/taskbar/goproxy-gui_x86.exe ./assets/packaging/goproxy-gui.exe
-	make GOOS=windows GOARCH=386 CGO_ENABLED=0
+	pushd ./assets/taskbar
+	env GOARCH=amd64 ./make.bash
+	env GOARCH=386 ./make.bash
+	popd
 
 	cat <<EOF |
-make GOOS=darwin GOARCH=amd64 CGO_ENABLED=0
-make GOOS=freebsd GOARCH=386 CGO_ENABLED=0
-make GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0
-make GOOS=freebsd GOARCH=arm CGO_ENABLED=0
-make GOOS=linux GOARCH=386 CGO_ENABLED=0
-make GOOS=linux GOARCH=amd64 CGO_ENABLED=0
-make GOOS=linux GOARCH=arm CGO_ENABLED=0
-make GOOS=linux GOARCH=arm CGO_ENABLED=1
-make GOOS=linux GOARCH=arm64 CGO_ENABLED=0
-make GOOS=linux GOARCH=mips CGO_ENABLED=0
-make GOOS=linux GOARCH=mips64 CGO_ENABLED=0
-make GOOS=linux GOARCH=mips64le CGO_ENABLED=0
-make GOOS=linux GOARCH=mipsle CGO_ENABLED=0
+GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 ./make.bash
+GOOS=freebsd GOARCH=386 CGO_ENABLED=0 ./make.bash
+GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 ./make.bash
+GOOS=freebsd GOARCH=arm CGO_ENABLED=0 ./make.bash
+GOOS=linux GOARCH=386 CGO_ENABLED=0 ./make.bash
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 ./make.bash
+GOOS=linux GOARCH=arm CGO_ENABLED=0 ./make.bash
+GOOS=linux GOARCH=arm CGO_ENABLED=1 ./make.bash
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 ./make.bash
+GOOS=linux GOARCH=mips CGO_ENABLED=0 ./make.bash
+GOOS=linux GOARCH=mips64 CGO_ENABLED=0 ./make.bash
+GOOS=linux GOARCH=mips64le CGO_ENABLED=0 ./make.bash
+GOOS=linux GOARCH=mipsle CGO_ENABLED=0 ./make.bash
+GOOS=windows GOARCH=386 CGO_ENABLED=0 ./make.bash
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 ./make.bash
 EOF
 	xargs --max-procs=5 -n1 -i bash -c {}
+
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 ./make.bash check
 
 	mkdir -p ${WORKING_DIR}/r${RELEASE}
 	cp -r build/*/dist/* ${WORKING_DIR}/r${RELEASE}
@@ -204,7 +231,7 @@ EOF
 	cp ${WORKING_DIR}/${GITHUB_REPO}/assets/packaging/goproxy-macos.icns GoProxy.app/Contents/Resources/
 	cat <<EOF > GoProxy.app/Contents/Info.plist
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
         <key>CFBundleExecutable</key>
@@ -249,18 +276,27 @@ function build_repo_ex() {
 	git checkout -f server.vps
 	git fetch origin server.vps
 	git reset --hard origin/server.vps
+	git clean -dfx .
 
-	git clone --branch ${GOBRANCH} https://github.com/phuslu/goproxy $GOPATH/src/github.com/phuslu/goproxy
+	git clone --branch master https://github.com/phuslu/goproxy $GOPATH/src/github.com/phuslu/goproxy
 	awk 'match($1, /"((github\.com|golang\.org|gopkg\.in)\/.+)"/) {if (!seen[$1]++) {gsub("\"", "", $1); print $1}}' $(find . -name "*.go") | xargs -n1 -i go get -u -v {}
 
-	for OSARCH in linux/amd64 linux/386 linux/arm64 linux/arm linux/mips linux/mipsle windows/amd64 darwin/amd64
-	do
-		rm -rf goproxy-vps
-		make GOOS=${OSARCH%/*} GOARCH=${OSARCH#*/}
-	done
+	cat <<EOF |
+GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 ./make.bash
+GOOS=linux GOARCH=386 CGO_ENABLED=0 ./make.bash
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 ./make.bash
+GOOS=linux GOARCH=arm CGO_ENABLED=0 ./make.bash
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 ./make.bash
+GOOS=linux GOARCH=mipsle CGO_ENABLED=0 ./make.bash
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 ./make.bash
+EOF
+	xargs --max-procs=5 -n1 -i bash -c {}
 
+	local files=$(find ./build -type f -name "*.gz" -or -name "*.bz2" -or -name "*.xz")
+	cp ${files} ${WORKING_DIR}/r${RELEASE}
+
+	cd ${WORKING_DIR}/r${RELEASE}
 	rename 's/_darwin_(amd64|386)/_macos_\1/' *
-	cp -r $(/bin/ls *.{gz,bz2,xz}) ${WORKING_DIR}/r${RELEASE}
 
 	popd
 }
@@ -339,6 +375,33 @@ function release_sourceforge() {
 	popd
 }
 
+function release_github_pages() {
+	pushd ${WORKING_DIR}/
+
+	git clone https://${GITHUB_USER}@github.com/${GITHUB_USER}/${GITHUB_USER}.github.io
+	mkdir -p ${GITHUB_USER}.github.io/goproxy
+	cd ${GITHUB_USER}.github.io/goproxy
+
+	for FILE in \
+			goproxy_linux_amd64-r${RELEASE}.tar.xz \
+			goproxy_macos_app-r${RELEASE}.tar.bz2 \
+			goproxy_windows_amd64-r${RELEASE}.7z
+	do
+		SIZE=$(/bin/ls -l ${WORKING_DIR}/r${RELEASE}/${FILE} | awk '{print $5}')
+		cat <<EOF > ${FILE}.url
+[InternetShortcut]
+URL=https://github.com/phuslu/goproxy-ci/releases/download/r${RELEASE}/${FILE}
+SIZE=${SIZE}
+EOF
+	done
+
+	git add *
+	git commit -m "update goproxy" -s -a
+	git push origin master
+
+	popd
+}
+
 function clean() {
 	set +ex
 
@@ -357,10 +420,13 @@ init_github
 build_go
 build_glog
 build_http2
+build_bogo
+build_quicgo
 build_repo
 if [ "x${TRAVIS_EVENT_TYPE}" == "xpush" ]; then
 	build_repo_ex
 	release_github
 	release_sourceforge
+	#release_github_pages
 	clean
 fi
