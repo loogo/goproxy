@@ -89,9 +89,14 @@ try:
     filename = './google_appengine/httplib2/__init__.py'
     with open(filename, 'rb') as fp:
         text = fp.read()
-    if 'self.proxy_rdns = proxy_rdns' in text:
-        with open(filename, 'wb') as fp:
-            fp.write(text.replace('self.proxy_rdns = proxy_rdns', 'self.proxy_rdns = True'))
+    pairs = [
+        ('self.proxy_rdns = proxy_rdns', 'self.proxy_rdns = True'),
+        ('content = zlib.decompress(content)', 'content = zlib.decompress(content, -zlib.MAX_WBITS)'),
+    ]
+    for old, new in pairs:
+        text = text.replace(old, new)
+    with open(filename, 'wb') as fp:
+        fp.write(text)
 except Exception:
     raise
 
@@ -146,7 +151,7 @@ if __name__ == '__main__':
 ===============================================================
 
 请输入您的appid, 多个appid请用|号隔开
-注意：appid 请勿包含 ios/android/mobile 等字样，否则可能被某些网站识别成移动设备。
+特别提醒：appid 请勿包含 ID/Email 等个人信息！
         '''.strip())
     main()
     println(os.linesep + u'上传成功，请不要忘记编辑 gae.user.json 把你的appid填进去，谢谢。按回车键退出程序。')

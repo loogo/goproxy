@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/flate"
+	"compress/gzip"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -141,7 +142,6 @@ func handlerError(c appengine.Context, rw http.ResponseWriter, err error, code i
 func handler(rw http.ResponseWriter, r *http.Request) {
 	var err error
 	c := appengine.NewContext(r)
-	c.Infof("Hanlde Request=%#v\n", r)
 
 	var hdrLen uint16
 	if err := binary.Read(r.Body, binary.BigEndian, &hdrLen); err != nil {
@@ -157,6 +157,8 @@ func handler(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	req.RemoteAddr = r.RemoteAddr
+	req.TLS = r.TLS
 	req.Body = r.Body
 	defer req.Body.Close()
 
@@ -176,16 +178,21 @@ func handler(rw http.ResponseWriter, r *http.Request) {
 	oAE := req.Header.Get("Accept-Encoding")
 	req.Header.Del("Accept-Encoding")
 
-	c.Infof("Parsed Request=%#v\n", req)
+	debugHeader := params.Get("X-UrlFetch-Debug")
+	debug := debugHeader != ""
+
+	if debug {
+		c.Infof("Parsed Request=%#v\n", req)
+	}
 
 	if Password != "" {
 		password := params.Get("X-UrlFetch-Password")
 		switch {
 		case password == "":
-			handlerError(c, rw, fmt.Errorf("No Password."), http.StatusForbidden)
+			handlerError(c, rw, fmt.Errorf("urlfetch password required"), http.StatusForbidden)
 			return
 		case password != Password:
-			handlerError(c, rw, fmt.Errorf("Wrong Password."), http.StatusForbidden)
+			handlerError(c, rw, fmt.Errorf("urlfetch password is wrong"), http.StatusForbidden)
 			return
 		}
 	}
@@ -297,36 +304,57 @@ func handler(rw http.ResponseWriter, r *http.Request) {
 		resp.Header.Set("Content-Length", strconv.FormatInt(resp.ContentLength, 10))
 	}
 
-	if s := resp.Header.Get("Content-Type"); strings.HasPrefix(s, "text/") ||
-			strings.HasPrefix(s, "application/json") ||
-			strings.HasPrefix(s, "application/x-javascript") ||
-			strings.HasPrefix(s, "application/javascript") {
+	// urlfetch will decompress content, so try remove Content-Encoding
+	ce := resp.Header.Get("Content-Encoding")
+	ct := resp.Header.Get("Content-Type")
+	resp.Header.Del("Content-Encoding")
+
+	if (ce != "" ||
+		strings.HasPrefix(ct, "text/") ||
+		strings.HasPrefix(ct, "application/json") ||
+		strings.HasPrefix(ct, "application/x-javascript") ||
+		strings.HasPrefix(ct, "application/javascript") ||
+		strings.HasPrefix(ct, "application/x-www-form-urlencoded")) &&
+		resp.ContentLength > 1024 {
 		if v := reflect.ValueOf(resp.Body).Elem().FieldByName("content"); v.IsValid() {
-			b := v.Bytes()
-			if !IsBinary(b) {
-				resp.Header.Del("Content-Encoding")
+			var bb bytes.Buffer
+			var w io.WriteCloser
+			var ce1 string
 
-				if resp.ContentLength > 1024 && strings.Contains(oAE, "deflate") {
-					var bb bytes.Buffer
+			switch {
+			case strings.Contains(oAE, "deflate"):
+				w, err = flate.NewWriter(&bb, flate.BestCompression)
+				ce1 = "deflate"
+			case strings.Contains(oAE, "gzip"):
+				w, err = gzip.NewWriterLevel(&bb, gzip.BestCompression)
+				ce1 = "gzip"
+			}
 
-					w, _ := flate.NewWriter(&bb, flate.BestCompression)
-					w.Write(b)
-					w.Close()
+			if err != nil {
+				handlerError(c, rw, err, http.StatusBadGateway)
+				return
+			}
 
-					bbLen := int64(bb.Len())
+			if w != nil {
+				w.Write(v.Bytes())
+				w.Close()
 
-					if bbLen < resp.ContentLength {
-						resp.Body = ioutil.NopCloser(&bb)
-						resp.ContentLength = bbLen
-						resp.Header.Set("Content-Length", strconv.FormatInt(resp.ContentLength, 10))
-						resp.Header.Set("Content-Encoding", "deflate")
-					}
+				bbLen := int64(bb.Len())
+				if bbLen < resp.ContentLength {
+					resp.Body = ioutil.NopCloser(&bb)
+					resp.ContentLength = bbLen
+					resp.Header.Set("Content-Length", strconv.FormatInt(resp.ContentLength, 10))
+					resp.Header.Set("Content-Encoding", ce1)
 				}
 			}
 		}
 	}
 
-	c.Infof("Write Response=%#v\n", resp)
+	if debug {
+		c.Infof("Write Response=%#v\n", resp)
+	}
+
+	c.Infof("%s \"%s %s %s\" %d %s", resp.Request.RemoteAddr, resp.Request.Method, resp.Request.URL.String(), resp.Request.Proto, resp.StatusCode, resp.Header.Get("Content-Length"))
 
 	var b bytes.Buffer
 	w, _ := flate.NewWriter(&b, flate.BestCompression)
